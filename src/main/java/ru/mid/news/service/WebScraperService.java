@@ -3,7 +3,7 @@ package ru.mid.news.service;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j; // Импортируем аннотацию
+import lombok.extern.slf4j.Slf4j;
 import org.openqa.selenium.By;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
@@ -27,9 +27,7 @@ import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -43,7 +41,6 @@ public class WebScraperService {
 
     @Value("${app.scraper.incognito}")
     private boolean incognitoMode;
-
 
     @Value("${app.main.page}")
     private String url;
@@ -66,16 +63,29 @@ public class WebScraperService {
     @Value("${app.scraper.random-delay.max}")
     private int maxDelay;
 
-
     private WebDriver driver;
 
     private final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm");
 
     private final List<News> newsList = new ArrayList<>();
 
+    // Путь к директории для хранения новостей
+    private final Path baseDirectory = Paths.get("mid-news");
+
     @PostConstruct
     public void init() {
         setupWebDriver();
+        createBaseDirectory();
+    }
+
+    private void createBaseDirectory() {
+        try {
+            if (!Files.exists(baseDirectory)) {
+                Files.createDirectory(baseDirectory);
+            }
+        } catch (IOException e) {
+            log.error("Ошибка при создании базовой директории: ", e);
+        }
     }
 
     private void setupWebDriver() {
@@ -86,7 +96,6 @@ public class WebScraperService {
         options.addArguments("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.82 Safari/537.36");
         options.addArguments("--disable-blink-features=AutomationControlled");
 
-        // Enable incognito mode if the flag is set to true
         if (incognitoMode) {
             options.addArguments("--incognito");
         }
@@ -113,8 +122,12 @@ public class WebScraperService {
             newsList.forEach(this::scrapeContent);
             newsRepository.saveAll(newsList);
 
+            updateGlobalIndex();
+
         } catch (Exception e) {
             log.error("Ошибка при сборе данных: ", e);
+        } finally {
+            cleanup();
         }
     }
 
@@ -131,6 +144,8 @@ public class WebScraperService {
                 news.setUrl(link);
 
                 newsList.add(news);
+                Collections.sort(newsList);
+
                 log.info("Новость добавлена в лист: {}", publicationDate);
             } else {
                 log.info("Дата и время новости уже есть в базе данных! {}", publicationDate);
@@ -140,7 +155,7 @@ public class WebScraperService {
 
     private void scrapeContent(News news) {
         try {
-            int delay = ThreadLocalRandom.current().nextInt(minDelay, maxDelay); // от 2 до 10 секунд
+            int delay = ThreadLocalRandom.current().nextInt(minDelay, maxDelay);
             log.info("Ждем {} миллисекунд перед открытием страницы: {}", delay, news.getUrl());
             Thread.sleep(delay);
 
@@ -157,7 +172,7 @@ public class WebScraperService {
                     .orElse(LocalDate.now());
 
             String dateString = publishedDate.format(DateTimeFormatter.ofPattern("dd-MM-yyyy"));
-            Path directoryPath = Paths.get(dateString);
+            Path directoryPath = baseDirectory.resolve(dateString);
 
             if (!Files.exists(directoryPath)) {
                 Files.createDirectory(directoryPath);
@@ -168,7 +183,7 @@ public class WebScraperService {
             if (directory.exists() && directory.isDirectory()) {
                 File[] files = directory.listFiles((dir, name) -> name.endsWith(".html"));
                 if (files != null && files.length > 0) {
-                    count.set(files.length + 1); // Продолжаем нумерацию
+                    count.set(files.length + 1);
                 }
             }
 
@@ -185,19 +200,27 @@ public class WebScraperService {
             Path indexPath = directoryPath.resolve("index.html");
             boolean indexExists = Files.exists(indexPath);
 
-            try (FileWriter indexWriter = new FileWriter(indexPath.toFile(), true)) {
-                if (!indexExists) {
-                    indexWriter.write("<h1 style=\"font-weight: bold; text-align: left;\">Новости</h1>\n");
-                }
+            String localFileLink = "<a href=\"" + fileName + "\">" + news.getTitle() + "</a>";
+            String newEntry = "<p>" + news.getPublicationDate().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))
+                    + " - " + localFileLink + "</p>\n";
 
-                String localFileLink = "<a href=\"" + fileName + "\">" + news.getTitle() + "</a>";
-                indexWriter.write("<p>" + news.getPublicationDate().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))
-                        + " - " + localFileLink + "</p>\n");
+            try {
+                if (!indexExists) {
+                    // Если индексный файл не существует, создаем его с заголовком
+                    try (FileWriter indexWriter = new FileWriter(indexPath.toFile())) {
+                        indexWriter.write("<h1 style=\"font-weight: bold; text-align: left;\">Новости</h1>\n");
+                        indexWriter.write(newEntry); // Добавляем первую запись
+                    }
+                } else {
+                    // Если файл существует, добавляем новую запись после заголовка
+                    prependToIndexFile(indexPath, newEntry);
+                }
 
                 log.info("Добавлена информация в index.html для новости: {}", news.getTitle());
             } catch (IOException e) {
                 log.warn("Ошибка при обновлении index.html для новости по ссылке: {}", news.getUrl(), e);
             }
+
 
         } catch (IOException | InterruptedException e) {
             log.warn("Ошибка при работе с файловой системой для новости по ссылке: {}", news.getUrl(), e);
@@ -205,6 +228,88 @@ public class WebScraperService {
             log.warn("Не удалось собрать содержимое для новости по ссылке: {}", news.getUrl(), e);
         }
     }
+
+    private void prependToIndexFile(Path indexPath, String newEntry) throws IOException {
+        // Читаем текущее содержимое файла
+        List<String> lines = Files.readAllLines(indexPath);
+
+        // Заголовок должен оставаться первым
+        String header = lines.get(0);
+
+        // Записываем заголовок и новую запись, затем остальное содержимое
+        try (FileWriter writer = new FileWriter(indexPath.toFile())) {
+            writer.write(header + "\n"); // Записываем заголовок
+            writer.write(newEntry); // Записываем новую запись
+
+            // Записываем остальное содержимое, начиная со второго элемента
+            for (int i = 1; i < lines.size(); i++) {
+                writer.write(lines.get(i) + "\n");
+            }
+        }
+    }
+
+
+    private void updateGlobalIndex() {
+        Path globalIndexPath = baseDirectory.resolve("mid_news_index.html");
+
+        try {
+            // Read existing content into a Set for quick lookup
+            Set<String> existingLinks = new HashSet<>();
+            if (Files.exists(globalIndexPath)) {
+                List<String> lines = Files.readAllLines(globalIndexPath);
+                for (String line : lines) {
+                    if (line.contains("<a href=")) {
+                        // Extract the href value from the <a> tag
+                        String link = line.substring(line.indexOf("href=\"") + 6, line.indexOf("\">"));
+                        existingLinks.add(link);
+                    }
+                }
+            }
+
+            // Append new links if they don't already exist
+            try (FileWriter globalIndexWriter = new FileWriter(globalIndexPath.toFile(), true)) {
+                Files.list(baseDirectory)
+                        .filter(Files::isDirectory)
+                        .sorted(Comparator.reverseOrder())
+                        .forEach(directory -> {
+                            String dirName = directory.getFileName().toString();
+                            String localIndexLink = "<a href=\"" + dirName + "/index.html\">" + dirName + "</a>";
+
+                            if (!existingLinks.contains(dirName + "/index.html")) {
+                                try {
+                                    // Читаем текущее содержимое файла
+                                    List<String> currentContent = Files.readAllLines(globalIndexPath);
+
+                                    // Проверяем наличие заголовка
+                                    boolean hasHeader = currentContent.stream().anyMatch(line -> line.contains("<h1>НОВОСТИ МИД</h1>"));
+
+                                    // Если заголовка нет, добавляем его в начало
+                                    if (!hasHeader) {
+                                        currentContent.add(0, "<h1>НОВОСТИ МИД</h1>\n");
+                                    }
+
+                                    // Добавляем новую ссылку в начало списка
+                                    currentContent.add(1, "<p>" + localIndexLink + "</p>"); // Добавляем после заголовка
+
+                                    // Записываем обновлённое содержимое обратно в файл
+                                    Files.write(globalIndexPath, currentContent);
+                                } catch (IOException e) {
+                                    log.warn("Ошибка при обновлении сводного индекса: ", e);
+                                }
+                            }
+                        });
+
+                log.info("Обновлён сводный индекс новостей");
+
+
+            } catch (IOException e) {
+                log.error("Ошибка при записи сводного индекса: ", e);
+            }
+        } catch (IOException e) {
+            log.error("Ошибка при чтении сводного индекса: ", e);
+        }
+    }
+
 
     @PreDestroy
     public void cleanup() {

@@ -6,7 +6,6 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-
 import java.time.LocalDateTime;
 
 @Entity
@@ -15,7 +14,7 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class News {
+public class News implements Comparable<News> {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -32,4 +31,9 @@ public class News {
 
     @Column(name = "publication_date", nullable = false)
     private LocalDateTime publicationDate;
+
+    @Override
+    public int compareTo(News other) {
+        return this.publicationDate.compareTo(other.publicationDate);
+    }
 }
